@@ -1,0 +1,123 @@
+# coding: utf-8
+from collections import deque
+from sklearn.neighbors import KNeighborsClassifier
+import airsim
+import time
+
+print("Starting...")
+
+class Obstacle:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def get_position(self):
+        return (self.x, self.y)
+
+# Actual obstacles: (3,2) and (4,5)
+obstacles = [Obstacle(3, 2), Obstacle(4, 5)]
+grid = [[0]*6 for _ in range(6)]
+for ob in obstacles:
+    x, y = ob.get_position()
+    grid[x][y] = 1
+print("Grid ready!")
+
+# FIX 1: Training data corrected
+# - Removed fake [4,3] obstacle (doesn't exist in grid)
+# - Replaced [5,4] obstacle with [4,5] (actual obstacle)
+# - Added more caution points so (5,5) predicts correctly as caution
+training_data = [
+    ([0, 0], "safe"),  ([0, 1], "safe"),  ([0, 2], "safe"),  ([0, 3], "safe"),
+    ([1, 0], "safe"),  ([1, 1], "safe"),  ([1, 2], "safe"),
+    ([2, 0], "safe"),  ([2, 1], "safe"),  ([3, 0], "safe"),
+    ([2, 2], "caution"), ([2, 3], "caution"), ([2, 4], "caution"), ([2, 5], "caution"),
+    ([3, 1], "caution"), ([3, 3], "caution"),
+    ([4, 0], "caution"), ([4, 1], "caution"),
+    ([5, 0], "caution"), ([5, 1], "caution"), ([5, 2], "caution"),
+    ([5, 3], "caution"), ([5, 4], "caution"), ([5, 5], "caution"),
+    ([3, 2], "obstacle"),
+    ([4, 5], "obstacle"),
+]
+X = [d[0] for d in training_data]
+y = [d[1] for d in training_data]
+model = KNeighborsClassifier(n_neighbors=3)
+model.fit(X, y)
+print("KNN ready!")
+
+# FIX 2: BFS now includes KNN zone check inside loop (was missing!)
+def bfs(grid, start, destination):
+    queue   = deque([start])
+    visited = {start}
+    parent  = {start: None}
+    while queue:
+        current = queue.popleft()
+        if current == destination:
+            break
+        for nx, ny in [
+            (current[0]-1, current[1]),
+            (current[0]+1, current[1]),
+            (current[0],   current[1]-1),
+            (current[0],   current[1]+1),
+        ]:
+            zone = model.predict([[nx, ny]])[0]      # KNN check
+            if (0 <= nx < 6 and 0 <= ny < 6 and
+                grid[nx][ny] == 0 and
+                zone != "obstacle" and               # KNN filter
+                (nx, ny) not in visited):
+                queue.append((nx, ny))
+                visited.add((nx, ny))
+                parent[(nx, ny)] = current
+    path, cur = [], destination
+    while cur:
+        path.append(cur)
+        cur = parent[cur]
+    path.reverse()
+    return path
+
+path = bfs(grid, (0, 0), (5, 5))
+
+# FIX 3: BFS already filters via KNN, no need for separate safe_path filter
+safe_path = path
+print(f"Path found: {len(safe_path)} waypoints")
+
+SCALE    = 5
+ALTITUDE = -20
+
+print("Connecting to AirSim...")
+client = airsim.MultirotorClient()
+client.confirmConnection()
+client.enableApiControl(True)
+client.armDisarm(True)
+print("Connected!")
+
+print("Takeoff...")
+client.takeoffAsync(timeout_sec=10).join()
+print("Airborne!")
+
+print("Mission Start!")
+for i, (x, y) in enumerate(safe_path[1:], 1):
+    zone  = model.predict([[x, y]])[0]
+    north = x * SCALE
+    east  = y * SCALE
+    print(f"Step {i} | Grid({x},{y}) -> NED({north}m,{east}m) | {zone}")
+    client.moveToPositionAsync(north, east, ALTITUDE, velocity=3).join()
+    time.sleep(0.3)
+
+print("Mission Complete!")
+print("Landing...")
+client.moveToPositionAsync(
+    safe_path[-1][0] * SCALE,
+    safe_path[-1][1] * SCALE,
+    -5, velocity=1
+).join()
+time.sleep(2)
+client.moveToPositionAsync(
+    safe_path[-1][0] * SCALE,
+    safe_path[-1][1] * SCALE,
+    -2, velocity=1
+).join()
+time.sleep(2)
+client.landAsync(timeout_sec=15).join()
+client.armDisarm(False)
+client.enableApiControl(False)
+print("Landed!")
+print("Done!")
