@@ -1,5 +1,5 @@
 
-# DroneRoute AI 🚁
+# DroneRoute AI 
 
 ML-based autonomous drone navigation system using 
 KNN Classification + BFS Path Planning + Microsoft AirSim
